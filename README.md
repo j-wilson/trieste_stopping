@@ -18,7 +18,7 @@ pip install ".[experiments,tutorials]"
 
 
 # Tutorials
-Tutorials for parts of this package are included in the `tutorials` directory. These notebooks explain various methods ad APIs:
+Tutorials for parts of this package are included in the `tutorials` directory. These notebooks explain various methods and APIs:
 
 
 | Notebook           | Content                                                      |
