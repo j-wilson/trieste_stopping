@@ -1,7 +1,7 @@
 # Overview
 Stopping rules for Bayesian optimization within the [Trieste](https://github.com/secondmind-labs/trieste/tree/develop/trieste) framework, a Bayesian optimization package based on [GPflow](https://github.com/GPflow/GPflow/tree/develop/gpflow) and [TensorFlow](https://github.com/tensorflow/tensorflow). 
 
-This package serves as companion code for [Stopping Bayesian Optimization with Probabilistic Regret Bounds](http://arxiv.org/abs/2402.16811). This paper introduces a `ProbabilisticRegreBoundRule` stopping rule which says: stop when a point has been found whose value is within $\delta>0$ of the best possible outcome with probability at least $1 - \epsilon$ under the model.
+This package serves as companion code for [Stopping Bayesian Optimization with Probabilistic Regret Bounds](http://arxiv.org/abs/2402.16811). This paper introduces a `ProbabilisticRegreBoundRule` stopping rule which says: stop when a point has been found whose value is within $\epsilon>0$ of the best possible outcome with probability at least $1 - \delta$ under the model.
 
 
 # Installation
