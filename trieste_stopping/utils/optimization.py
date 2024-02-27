@@ -305,9 +305,8 @@ def run_multistart_gradient_ascent(
         num_cmaes_runs=num_cmaes_runs,
         cmaes_kwargs=cmaes_kwargs
     )
-    # print(f"{start_points.shape=}")
 
-    # Logic for differentiating between runs on single vs. multiple problems in parallel
+    # Check if we are optimizing a single function or multiple functions in parallel
     if tf.rank(start_points) == 3:
         single_problem = False
     elif tf.rank(start_points) == 2:
@@ -339,12 +338,3 @@ def run_multistart_gradient_ascent(
     best_point = tf.gather(final_points, indices, axis=-2, batch_dims=batch_dims)
     best_value = tf.gather(final_values, indices, axis=-1, batch_dims=batch_dims)
     return best_point, best_value
-
-
-
-
-
-
-
-
-

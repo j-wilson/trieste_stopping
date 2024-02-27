@@ -144,25 +144,23 @@ class MatheronTrajectory(BatchModule):
 
     def set_update_trajectory(self, cholesky: TensorType | None = None) -> None:
         # Draw samples from the prior predictive
-        X, Y = self.model.data
-        prior_values = self.model.mean_function(X) + self.prior_trajectory(X)
-        noise_variance = tf.expand_dims(self.model.likelihood.variance, -1)
-        prior_predictive_values = prior_values + tf.multiply(
-            tf.expand_dims(tf.sqrt(noise_variance), -1),
-            tf.random.normal(shape=tf.shape(prior_values), dtype=prior_values.dtype)
+        X, y = self.model.data
+        sigma2 = tf.expand_dims(self.model.likelihood.variance, -1)
+        samples_y = self.model.mean_function(X) + self.prior_trajectory(X)
+        samples_y += tf.multiply(
+            tf.expand_dims(tf.sqrt(sigma2), -1),
+            tf.random.normal(shape=tf.shape(samples_y), dtype=samples_y.dtype)
         )
 
         # Compute Gaussian updates
-        prior_predictive_errors = Y - prior_predictive_values
         if cholesky is None:
-            prior_covariance = self.model.kernel(X, full_cov=True)
-            prior_predictive_covariance = tf.linalg.set_diag(
-                prior_covariance,
-                tf.linalg.diag_part(prior_covariance) + noise_variance,
+            covariance_y = self.model.kernel(X, full_cov=True)
+            covariance_y = tf.linalg.set_diag(
+                covariance_y, tf.linalg.diag_part(covariance_y) + sigma2,
             )
-            cholesky = tf.linalg.cholesky(prior_predictive_covariance)
+            cholesky = tf.linalg.cholesky(covariance_y)
 
-        weights = tf.linalg.cholesky_solve(cholesky, prior_predictive_errors)
+        weights = tf.linalg.cholesky_solve(cholesky, y - samples_y)
         if self.update_trajectory is None:
             self.update_trajectory = LinearTrajectory(
                 weights=weights,

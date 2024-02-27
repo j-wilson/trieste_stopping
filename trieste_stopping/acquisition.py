@@ -27,8 +27,11 @@ def maximize_acquisition(
 ) -> tf.Tensor:
     """Multi-start gradient ascent routine for maximizing acquisition functions."""
 
-    def wrapper(points: TensorType) -> tf.Tensor:  # batch_shape x input_dim
-        values = acquisition_function(tf.expand_dims(points, axis=-2))
+    def wrapper(points: TensorType) -> tf.Tensor:
+        if tf.rank(points) == 2:
+            points = tf.expand_dims(points, axis=-2)
+
+        values = acquisition_function(points)
         return tf.squeeze(values, axis=-1)   # batch_shape
 
     if include_queried_points:  # incl. queried points as potential starting positions

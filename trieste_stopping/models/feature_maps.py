@@ -4,8 +4,9 @@ from typing import Any, Sequence, TypeVar
 from typing_extensions import Self
 
 import tensorflow as tf
-from gpflow.base import TensorType
 from gpflow import kernels
+from gpflow.base import TensorType
+from gpflow.config import default_float
 from multipledispatch import Dispatcher
 from trieste_stopping.models.utils import get_slice, BatchModule
 from trieste_stopping.settings import default_num_features
@@ -145,21 +146,20 @@ def _(
         batch_shape = tf.TensorShape(batch_shape)
 
     # Generate standard normal weights
-    dtype = next(iter(kernel.parameters)).dtype  # TODO: Test me!
     shape = batch_shape + (num_inputs, num_features // 2)
-    weights = tf.random.normal(shape, dtype=dtype)
+    weights = tf.random.normal(shape, dtype=default_float())
     if not isinstance(kernel, kernels.SquaredExponential):
         # Convert to multivariate student-t
         nu = tf.cast(
             1 / 2 if isinstance(kernel, kernels.Matern12)
             else 3 / 2 if isinstance(kernel, kernels.Matern32)
             else 5 / 2,
-            dtype=dtype
+            dtype=default_float(),
         )
         weights *= tf.math.rsqrt(
             tf.random.gamma(
                 shape=shape[:-2] + (1,) + shape[-1:],
-                dtype=dtype,
+                dtype=default_float(),
                 alpha=nu,
                 beta=nu,
             )

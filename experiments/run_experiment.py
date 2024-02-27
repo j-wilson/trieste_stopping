@@ -155,7 +155,7 @@ def create_factories(args: argparse.Namespace) -> tuple[
         constructor = getattr(trieste_stopping.stopping, args.stopping_rule)
         if args.stopping_rule == "FixedBudget":
             steps = tuple(range(args.initial_step, args.step_limit))
-            stopping_rule = constructor(budget=len(steps))
+            stopping_rule = constructor(budget=max(steps))
         elif args.stopping_rule == "AcquisitionThreshold":
             stopping_rule = constructor(acquisition_rule=acquisition_rule, threshold=1e-5)
         elif args.stopping_rule == "ConfidenceBound":

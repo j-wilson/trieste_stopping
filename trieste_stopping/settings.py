@@ -30,12 +30,15 @@ class Setting(Generic[T]):
 
 # Settings for default (hyper)priors
 empirical_variance_floor: Setting[float] = Setting(1e-6)
+
 mean_percentile_range: Setting[tuple[float, float]] = Setting((5.0, 95.0))
-kernel_lengthscale_median: Setting[float] = Setting(0.5)
+
 kernel_variance_init: Setting[float] = Setting(1.0)
 kernel_variance_range: Setting[tuple[float, float]] = Setting((0.1, 10.0))
-likelihood_variance_range: Setting[tuple[float, float]] = Setting((1e-9, 10.0))
+kernel_lengthscale_median: Setting[float] = Setting(0.5)
+
 likelihood_variance_init: Setting[float] = Setting(0.1)
+likelihood_variance_range: Setting[tuple[float, float]] = Setting((1e-9, 10.0))
 
 # Settings for trajectory samplers
 default_num_features: Setting[int] = Setting(default=1024)
