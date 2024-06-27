@@ -15,7 +15,8 @@ from trieste.acquisition.interface import (
 from trieste.data import Dataset
 from trieste.space import Box
 from trieste.types import TensorType
-from trieste_stopping.utils import run_multistart_gradient_ascent
+from trieste_stopping.models import get_link_function
+from trieste_stopping.utils import get_expected_value, run_multistart_gradient_ascent
 
 
 def maximize_acquisition(
@@ -52,26 +53,26 @@ def maximize_acquisition(
 
 
 class InSampleKnowledgeGradient(SingleModelAcquisitionBuilder):
-    def __init__(self, num_fantasies: int = 64):
+    def __init__(self, num_samples: int = 16):
         super().__init__()
-        self.num_fantasies = num_fantasies
+        self.num_samples = num_samples
 
     def prepare_acquisition_function(
         self,
         model: ProbabilisticModelType,
         dataset: Dataset | None = None,
-        num_fantasies: int | None = None,
-        incumbent_index: TensorType | None = None,
+        num_samples: int | None = None,
+        best_index: TensorType | None = None,
         candidate_indices: TensorType | None = None,
         **kwargs: Any,
     ) -> insample_knowledge_gradient:
-        if num_fantasies is None:
-            num_fantasies = self.num_fantasies
+        if num_samples is None:
+            num_samples = self.num_samples
 
         return insample_knowledge_gradient(
             model=model,
-            num_fantasies=num_fantasies,
-            incumbent_index=incumbent_index,
+            num_samples=num_samples,
+            best_index=best_index,
             candidate_indices=candidate_indices,
             **kwargs,
         )
@@ -81,11 +82,11 @@ class InSampleKnowledgeGradient(SingleModelAcquisitionBuilder):
         function: insample_knowledge_gradient,
         model: ProbabilisticModelType,
         dataset: Dataset | None = None,
-        incumbent_index: TensorType | None = None,
+        best_index: TensorType | None = None,
         candidate_indices: TensorType | None = None,
         **kwargs: Any,
     ) -> insample_knowledge_gradient:
-        function.update(incumbent_index, candidate_indices, **kwargs)
+        function.update(best_index, candidate_indices, **kwargs)
         return function
 
 
@@ -93,106 +94,134 @@ class InSampleKnowledgeGradientCache(NamedTuple):
     L: TensorType  # Cholesky factor of prior predictive covariance Cov[y(X), y(X)]
     iL_cov: TensorType  # L^{-1} Cov[f(X), f(X)]
     iL_err: TensorType  # L^{-1} y(X)
-    posterior_means: TensorType  # posterior means
-    incumbent_index: TensorType  # index of best point, defaults posterior minimizer
-    candidate_indices: TensorType  # indices of active subset, defaults to all points
+    posterior: tuple[TensorType, TensorType]  # posterior means and variances
+    best_index: TensorType  # index of best point, defaults posterior minimizer
+    active_indices: TensorType  # indices of active subset, defaults to all points
 
 
 class insample_knowledge_gradient:
     def __init__(
         self,
         model,
-        incumbent_index: TensorType | None = None,
+        best_index: TensorType | None = None,
         candidate_indices: tf.Tensor | None = None,
-        num_fantasies: int = 64,
+        num_samples: int = 64,
+        parallel_iterations: int = 1,
     ):
         self._model = model
-        self._num_fantasies = num_fantasies
-        self._cache = self.prepare_cache(incumbent_index, candidate_indices)
+        self._num_samples = num_samples
+        self._parallel_iterations = parallel_iterations
+        self._cache = self.prepare_cache(best_index, candidate_indices)
 
         # Generate quadrature rule
         z, dz = (
             tf.convert_to_tensor(arr, dtype=self._cache.L.dtype)
-            for arr in hermgauss(deg=self._num_fantasies)
+            for arr in hermgauss(deg=self._num_samples)
         )
-        self._quadrature_z = math.sqrt(2) * z
-        self._quadrature_w = (math.pi ** -0.5) * dz
+        self._quadrature_z = math.sqrt(2) * z  # abscissae
+        self._quadrature_w = (math.pi ** -0.5) * dz  # weights
 
     @tf.function
-    def __call__(self, x: TensorType):
-        # Unpack cached terms
-        L11, iL11_K11, iL11_err1, mf1_given_y1, incumbent, candidates = self._cache
+    def __call__(self, x: TensorType) -> tf.Tensor:
+        """
+        Compute the knowledge acquisition function on the set of observed points.
 
-        # Compute moments of f(x2) | Y1
-        x2 = x  # local alias to help with naming convention
-        model = self._model.model
-        X1, _ = model.data
-        K12 = tf.linalg.adjoint(model.kernel(x2, X1))  # batch x 1 x num_train
-        iL11_K12 = tf.linalg.triangular_solve(L11, K12, lower=True)
-        mf2_given_y1 = (
-            model.mean_function(x2) + tf.matmul(iL11_K12, iL11_err1, transpose_a=True)
-        )
-        vf2_given_y1 = (
-            model.kernel(x2) - tf.reduce_sum(tf.square(iL11_K12), -2, keepdims=True)
-        )
-        vy2_given_Y1 = tf.maximum(vf2_given_y1 + model.likelihood.variance, 1e-12)
+        As notation, we use `1` to denote quantities related to the set of observed
+        points, `2` to denote quantities related to the input `x`, and `3` to denote
+        the union of `1` and `2`.
+        """
+        # Unpack cached terms
+        L11, iL11_K11, iL11_err1, (mf1_given_y1, vf1_given_y1), best, keep = self._cache
+
+        # Compute moments of $f(x2) | y1$ and $y(x2) | y1$
+        X2 = x  # local alias to help with naming convention
+        gp = self._model.model
+        X1, _ = gp.data
+        k12 = tf.linalg.adjoint(gp.kernel(X2, X1))  # batch x 1 x num_train
+        iL11_k12 = tf.linalg.triangular_solve(L11, k12, lower=True)
+        k21_iK11_err1 = tf.matmul(iL11_k12, iL11_err1, transpose_a=True)
+        mf2_given_y1 = gp.mean_function(X2) + k21_iK11_err1
+        k21_iK11_k12 = tf.reduce_sum(tf.square(iL11_k12), -2, keepdims=True)
+        vf2_given_y1 = gp.kernel(X2) - k21_iK11_k12
+        vy2_given_y1 = tf.maximum(vf2_given_y1 + gp.likelihood.variance, 1e-12)
 
         # Prune inactive points
-        K12 = tf.gather(K12, candidates, axis=-2)
-        iL11_K11 = tf.gather(iL11_K11, candidates, axis=-1)
-        mf1_given_y1 = tf.gather(mf1_given_y1, candidates, axis=-2)
+        k12 = tf.gather(k12, keep, axis=-2)
+        iL11_K11 = tf.gather(iL11_K11, keep, axis=-1)
+        mf1_given_y1 = tf.gather(mf1_given_y1, keep, axis=-2)
 
-        # Simulate Y2 | Y1, then compute E[f(X12) | Y12]
-        scaled_err2 = tf.math.rsqrt(vy2_given_Y1) * self._quadrature_z
-        K12_given_y1 = K12 - tf.matmul(iL11_K11, iL11_K12, transpose_a=True)
-        mf1_given_y12 = mf1_given_y1 + K12_given_y1 * scaled_err2
-        mf2_given_y12 = mf2_given_y1 + vf2_given_y1 * scaled_err2
+        # Simulate $y2 | y1$, then compute $E[f(X3) | y3]$
+        scaled_err2 = tf.math.rsqrt(vy2_given_y1) * self._quadrature_z
+        k12_given_y1 = k12 - tf.matmul(iL11_K11, iL11_k12, transpose_a=True)
+        mf1_given_y3 = mf1_given_y1 + k12_given_y1 * scaled_err2
+        mf2_given_y3 = mf2_given_y1 + vf2_given_y1 * scaled_err2
 
-        # Extract draws of min E[f(X12) | Y12]
-        emin_given_y12 = tf.minimum(  # batch x 1 x num_fantasies
-            mf2_given_y12, tf.reduce_min(mf1_given_y12, axis=-2, keepdims=True)
-        )
-        emin_given_y12 -= tf.gather(mf1_given_y12, [incumbent], axis=-2)
+        # Account for a link function, $E[g^{-1}(f(X3)) | y3]$
+        link = get_link_function(self._model, skip_identity=True)
+        if link is not None:
+            vf1_given_y3 = vf1_given_y1 - tf.square(k12_given_y1) / vy2_given_y1
+            vf2_given_y3 = vf2_given_y1 - tf.square(vf2_given_y1) / vy2_given_y1
+            mf1_given_y3, mf2_given_y3 = (
+                get_expected_value(
+                    mean=m,
+                    variance=v,
+                    inverse=link,
+                    num_samples=self._num_samples,
+                    parallel_iterations=self._parallel_iterations,  # limits memory use
+                )
+                for m, v in ((mf1_given_y3, vf1_given_y3), (mf2_given_y3, vf2_given_y3))
+            )
 
-        # Integrate out Y2 to approximate E_{Y2}[min E[f(X12) | Y12]]
-        emin_given_y1 = tf.linalg.matvec(emin_given_y12, self._quadrature_w)
-        return -emin_given_y1  # sign flip
+        # Extract draws of $min E[g^{-1}(f(X3)) | y3]$
+        emin_given_y3 = tf.gather(mf1_given_y3, [best], axis=-2) - tf.minimum(
+            mf2_given_y3, tf.reduce_min(mf1_given_y3, axis=-2, keepdims=True)
+        )  # batch x 1 x num_samples
+
+        # Integrate out y2 to estimate $E_{y2}[min E[g^{-1}(f(X3)) | y3]$
+        emin_given_y1 = tf.linalg.matvec(emin_given_y3, self._quadrature_w)
+        return emin_given_y1
 
     def prepare_cache(
         self,
-        incumbent_index: TensorType | None = None,
-        candidate_indices: TensorType | None = None,
+        best_index: TensorType | None = None,
+        active_indices: TensorType | None = None,
         out: InSampleKnowledgeGradientCache | None = None
     ) -> InSampleKnowledgeGradientCache:
+        gp = self._model.model
+        link = get_link_function(self._model)
+        X, Y = gp.data
 
-        model = self._model.model
-        X, Y = model.data
-        residuals = Y - model.mean_function(X)
-        covariance = model.kernel(X)
-        predictive_covariance = tf.linalg.set_diag(
-            covariance,
-            tf.linalg.diag_part(covariance) + model.likelihood.variance[..., None]
+        err = Y - gp.mean_function(X)
+        Kff = gp.kernel(X)
+        Kyy = tf.linalg.set_diag(
+            Kff,
+            tf.linalg.diag_part(Kff) + gp.likelihood.variance[..., None]
         )
 
-        L = tf.linalg.cholesky(predictive_covariance)
-        iL_cov = tf.linalg.triangular_solve(L, covariance, lower=True)
-        iL_err = tf.linalg.triangular_solve(L, residuals, lower=True)
-        posterior_means = (
-            model.mean_function(X) + tf.matmul(iL_cov, iL_err, transpose_a=True)
-        )
-        if incumbent_index is None:
-            incumbent_index = tf.argmin(tf.squeeze(posterior_means, axis=-1), axis=0)
+        L = tf.linalg.cholesky(Kyy)
+        iL_cov = tf.linalg.triangular_solve(L, Kff, lower=True)
+        iL_err = tf.linalg.triangular_solve(L, err, lower=True)
 
-        if candidate_indices is None:
-            candidate_indices = tf.range(tf.shape(X)[-2])
+        means = gp.mean_function(X) + tf.matmul(iL_cov, iL_err, transpose_a=True)
+        variances = tf.expand_dims(
+            tf.linalg.diag_part(Kff) - tf.reduce_sum(tf.square(iL_cov), axis=-2),
+            axis=-1
+        )
+        if best_index is None:
+            expected_values = get_expected_value(means, variances, inverse=link)
+            best_index = tf.argmin(tf.squeeze(expected_values, axis=-1), axis=0)
+
+        if active_indices is None:  # can use InSampleExpectedMinimum if lots of points
+            active_indices = tf.range(tf.shape(X)[-2])
 
         if out:
             out.L.assign(L)
             out.iL_cov.assign(iL_cov)
             out.iL_err.assign(iL_err)
-            out.posterior_means.assign(posterior_means)
-            out.incumbent_index.assign(incumbent_index)
-            out.candidate_indices.assign(candidate_indices)
+            out.posterior[0].assign(means)
+            out.posterior[1].assign(variances)
+            out.best_index.assign(best_index)
+            out.active_indices.assign(active_indices)
             return out
 
         as_variable = partial(tf.Variable, trainable=False, shape=tf.TensorShape(None))
@@ -200,18 +229,14 @@ class insample_knowledge_gradient:
             L=as_variable(L),
             iL_cov=as_variable(iL_cov),
             iL_err=as_variable(iL_err),
-            posterior_means=as_variable(posterior_means),
-            incumbent_index=as_variable(incumbent_index),
-            candidate_indices=as_variable(candidate_indices)
+            posterior=(as_variable(means), as_variable(variances)),
+            best_index=as_variable(best_index),
+            active_indices=as_variable(active_indices)
         )
 
     def update(
         self,
-        incumbent_index: TensorType | None = None,
+        best_index: TensorType | None = None,
         candidate_indices: TensorType | None = None
     ) -> None:
-        self.prepare_cache(
-            incumbent_index=incumbent_index,
-            candidate_indices=candidate_indices,
-            out=self._cache
-        )
+        self.prepare_cache(best_index, candidate_indices, out=self._cache)

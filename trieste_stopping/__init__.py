@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 
-from trieste_stopping import acquisition, models, objectives, settings, stopping, utils
-
+from trieste_stopping import acquisition, models, selection, stopping, utils
 
 __all__ = [
     "acquisition",
     "models",
-    "objectives",
+    "selection",
     "stopping",
-    "settings",
     "utils",
 ]

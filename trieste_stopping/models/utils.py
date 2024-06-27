@@ -44,21 +44,12 @@ def get_parameters(module: Module) -> Iterator[tuple[str, Parameter]]:
 def set_parameters(module: Module, values: dict[str, Any]) -> None:
     for name, param in get_parameters(module):
         if name in values:
-            try:
+            if param.transform is None:
                 param.assign(values[name])
-            except Exception as e:  # check literal edge cases
+            else:
                 val = tf.convert_to_tensor(values[name], dtype_hint=param.dtype)
-                low, high = tf.unstack(get_parameter_bounds(param))
-                edge_case = tf.logical_or(val == low, val == high)
-                if param.transform is not None and tf.reduce_any(edge_case):
-                    unconstrained_val = param.transform.forward(val)
-                    if tf.reduce_any(tf.math.is_nan(unconstrained_val)):
-                        raise ValueError(
-                            f"One or more (unconstrained) values for {name} were NaN."
-                        )
-                    param.unconstrained_variable.assign(unconstrained_val)
-                else:
-                    raise e
+                unconstrained_val = param.transform.inverse(val)
+                param.unconstrained_variable.assign(unconstrained_val)
 
 
 def get_parameter_bounds(param: Parameter, unconstrained: bool = False) -> tf.Tensor:

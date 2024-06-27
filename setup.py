@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="trieste_stopping",
-    version="0.0",
+    version="1.0",
     packages=find_packages(exclude=["experiments", "tutorials"]),
     python_requires=">=3.10",
     install_requires=[
@@ -15,7 +15,7 @@ setup(
         "numpy",
     ],
     extras_require={
-        "experiments": ["wandb"],
+        "experiments": ["datasets",  "pandas", "scikit-learn", "wandb" "xgboost"],
         "tutorials": ["jupyter", "matplotlib", "seaborn"],
     }
 

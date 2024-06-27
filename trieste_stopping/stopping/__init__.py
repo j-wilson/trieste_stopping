@@ -7,6 +7,7 @@ from trieste_stopping.stopping.interface import (
 )
 from trieste_stopping.stopping.criteria import (
     AcquisitionThreshold,
+    ChangeInExpectedMinimum,
     ConfidenceBound,
     FixedBudget,
     ProbabilisticRegretBound,
@@ -15,6 +16,7 @@ from trieste_stopping.stopping.criteria import (
 
 __all__ = [
     "AcquisitionThreshold",
+    "ChangeInExpectedMinimum",
     "ConfidenceBound",
     "FixedBudget",
     "StoppingCriterion",

@@ -9,10 +9,11 @@ from gpflow.base import TensorType
 from gpflow.config import default_float
 from multipledispatch import Dispatcher
 from trieste_stopping.models.utils import get_slice, BatchModule
-from trieste_stopping.settings import default_num_features
+from trieste_stopping.utils import Setting
 
 TFeatureMap = TypeVar("TFeatureMap", bound=BatchModule)
 DrawKernelFeatureMap = Dispatcher("draw_kernel_feature_map")
+default_num_features: Setting[int] = Setting(default=1024)
 
 
 class KernelMap(BatchModule):

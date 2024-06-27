@@ -6,6 +6,7 @@ from typing_extensions import Self
 import tensorflow as tf
 from gpflow.base import TensorType
 from gpflow.models import GPR
+from tensorflow_probability.python.bijectors import Bijector
 from trieste_stopping.models.feature_maps import draw_kernel_feature_map, KernelMap, TFeatureMap
 from trieste_stopping.models.utils import BatchModule, get_slice
 
@@ -56,6 +57,7 @@ class MatheronTrajectory(BatchModule):
         num_features: int | None = None,
         prior_trajectory: LinearTrajectory | None = None,
         update_trajectory: LinearTrajectory[KernelMap] | None = None,
+        link_function: Bijector | None = None,
         initialized: bool | tf.Variable = False,
         **kwargs: Any,
     ):
@@ -68,16 +70,18 @@ class MatheronTrajectory(BatchModule):
         self.model = model
         self.prior_trajectory = prior_trajectory
         self.update_trajectory = update_trajectory
+        self.link_function = link_function
         if batch_shape is not None:
             self.resample(batch_shape=batch_shape, num_features=num_features)
 
     def __call__(self, x: TensorType) -> tf.Tensor:
         with tf.control_dependencies([tf.assert_equal(self.initialized, True)]):
-            return (
-                self.model.mean_function(x)
-                + self.prior_trajectory(x)
+            f = (
+                self.prior_trajectory(x)
                 + self.update_trajectory(x)
+                + self.model.mean_function(x)
             )
+            return f if self.link_function is None else self.link_function.inverse(f)
 
     def slice(self, index: TensorType, out: type[Self] | None = None) -> type[Self]:
         if not self.initialized:

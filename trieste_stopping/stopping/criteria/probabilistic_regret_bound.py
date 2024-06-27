@@ -1,84 +1,94 @@
 from __future__ import annotations
 
-from dataclasses import asdict
 from typing import Any, Callable, Iterable
-from warnings import warn
 
 import tensorflow as tf
 from gpflow.config import default_float
-from tensorflow_probability.python.internal.special_math import ndtr
 from trieste.data import Dataset
 from trieste.models.gpflow import GaussianProcessRegression
 from trieste.space import Box
 from trieste.types import TensorType
 from trieste.utils import Timer
-from trieste_stopping.incumbent import IncumbentRule
-from trieste_stopping.models.trajectories import MatheronTrajectory
+from trieste_stopping.models import get_link_function, MatheronTrajectory
+from trieste_stopping.selection import InSampleProbabilityOfMinimum, SelectionRule
 from trieste_stopping.stopping.interface import (
     StoppingCriterion,
     StoppingData,
     StoppingRule,
 )
-from trieste_stopping.utils.optimization import find_start_points, run_gradient_ascent
-from trieste_stopping.utils.probability import (
-    adaptive_empirical_bernstein_estimator,
-    AdaptiveEstimatorConfig,
-    build_power_schedule,
-    EstimatorStoppingCondition,
+from trieste_stopping.utils.level_tests import (
+    _get_default_risk_schedule,
+    ClopperPearsonLevelTest,
+    LevelTestConvergence,
+    LevelTest
 )
+from trieste_stopping.utils.optimization import find_start_points, run_gradient_ascent
 
 
 class ProbabilisticRegretBound(StoppingRule["probabilistic_regret_bound"]):
+    """
+    Stopping rule from Wilson, 2024. "Stopping Bayesian Optimization with Probabilistic
+    Regret Bounds".
+
+    Stops when the simple regret of a queried point is less-equal to a threshold with
+    high probability under the model.
+    """
+
     def __init__(
         self,
+        prob_bound: float,
         regret_bound: float,
-        risk_tolerance_model: float,
-        risk_tolerance_error: float | Callable[[int], float],
-        time_limit: float = float("inf"),
-        batch_limit: int = 256,
-        popsize_limit: int = 2 ** 31 - 1,
-        use_unconverged_estimates: bool = False,
-        incumbent_rule: IncumbentRule | None = None,
+        risk_bound: float | None = None,
+        risk_schedule: Callable[[int], float] | None = None,
+        level_test: LevelTest | None = None,
+        enforce_convergence: bool = True,
+        best_point_rule: SelectionRule | None = None,
     ):
-        if time_limit == float("inf") and popsize_limit == 2 ** 31 - 1:
-            warn(
-                "No limits were placed on the amount of time or number of samples the"
-                " estimator is allowed to use. This may result in exceedingly long"
-                " runtimes when evaluating the stopping rule."
-            )
+        """
+        Args:
+            prob_bound: Upper bound on probability regret exceeds `regret_bound`.
+            regret_bound: Upper bound on the simple regret.
+            risk_bound: Upper bound on probability a level test emits a false result.
+            risk_schedule: Schedule for the risk bound for each set of level tests.
+            level_test: A sample-based test for inferring whether the probability that
+                the regret exceeds `regret_bound` is above or below `prob_bound`.
+            enforce_convergence: Flag controlling whether estimates produced by level
+                tests that did not converge (due to resource constraints) can be used.
+            best_point_rule: A rule for choosing a most-preferred point.
+        """
+        if risk_bound is not None:  # schedule risk bounds for each sequence of tests
+            if risk_schedule is not None:
+                raise ValueError("Cannot pass both `risk_bound` and `risk_schedule`.")
+            risk_schedule = _get_default_risk_schedule(bound=risk_bound)
 
-        super().__init__(incumbent_rule=incumbent_rule)
-        self.estimator_config = AdaptiveEstimatorConfig(
-            time_limit=time_limit,
-            batch_limit=batch_limit,
-            popsize_limit=popsize_limit,
-            stopping_condition=EstimatorStoppingCondition.ANY_LE,
-        )
-        self.regret_bound = regret_bound
-        self.risk_tolerance_model = risk_tolerance_model
-        self.risk_tolerance_error_schedule = (
-            risk_tolerance_error
-            if isinstance(risk_tolerance_error, Callable)
-            else build_power_schedule(risk_tolerance_error)
-        )
-        self.use_unconverged_estimates = use_unconverged_estimates
+        if level_test is None:
+            level_test = ClopperPearsonLevelTest(convergence=LevelTestConvergence.ANY_LE)
+
+        super().__init__(best_point_rule=best_point_rule)
+        self._level_test = level_test
+        self._prob_bound = prob_bound
+        self._regret_bound = regret_bound
+        self._risk_schedule = risk_schedule
+        self._enforce_convergence = enforce_convergence
 
     def prepare_stopping_criterion(
         self, model: GaussianProcessRegression, dataset: Dataset,
     ) -> probabilistic_regret_bound:
-        step = int(tf.shape(dataset.observations)[0])
+        link_function = get_link_function(model)
         sampler = RegretIndicatorSampler(
-            trajectory=MatheronTrajectory(model=model.model),
-            regret_bound=self.regret_bound,
+            trajectory=MatheronTrajectory(model.model, link_function=link_function),
+            regret_bound=self._regret_bound,
         )
+
+        step = float(tf.shape(dataset.observations)[0])
         return probabilistic_regret_bound(
             model=model,
-            incumbent_rule=self.incumbent_rule,
+            best_point_rule=self._best_point_rule,
             sampler=sampler,
-            estimator_config=self.estimator_config,
-            risk_tolerance_model=self.risk_tolerance_model,
-            risk_tolerance_error=self.risk_tolerance_error_schedule(step),
-            use_unconverged_estimates=self.use_unconverged_estimates,
+            level_test=self._level_test,
+            prob_bound=self._prob_bound,
+            risk_bound=self._risk_schedule(step),
+            enforce_convergence=self._enforce_convergence,
         )
 
     def update_stopping_criterion(
@@ -93,147 +103,102 @@ class ProbabilisticRegretBound(StoppingRule["probabilistic_regret_bound"]):
         if model is not criterion.model:
             raise NotImplementedError
 
-        if self.incumbent_rule not in (None, criterion.incumbent_rule):
+        if self._best_point_rule not in (None, criterion.best_point_rule):
             raise NotImplementedError
 
         # Configure the criterion
-        step = int(tf.shape(dataset.observations)[0])
-        criterion.estimator_config = self.estimator_config
-        criterion.use_unconverged_estimates = self.use_unconverged_estimates
-
-        criterion.regret_bound.assign(self.regret_bound)
-        criterion.risk_tolerance_model.assign(self.risk_tolerance_model)
-        criterion.risk_tolerance_error.assign(self.risk_tolerance_error_schedule(step))
+        step = float(tf.shape(dataset.observations)[0])
+        criterion.prob_bound.assign(self._prob_bound)
+        criterion.regret_bound.assign(self._regret_bound)
+        criterion.risk_bound.assign(self._risk_schedule(step))
+        criterion.enforce_convergence.assign(self._enforce_convergence)
 
         # Mark sampler as uninitialized
         criterion.sampler.initialized.assign(False)
-
         return criterion
 
 
-class probabilistic_regret_bound(
-    StoppingCriterion[GaussianProcessRegression]
-):
+class probabilistic_regret_bound(StoppingCriterion[GaussianProcessRegression]):
     def __init__(
         self,
         model: GaussianProcessRegression,
         sampler: RegretIndicatorSampler,
-        risk_tolerance_model: float,
-        risk_tolerance_error: float,
-        estimator_config: AdaptiveEstimatorConfig,
-        use_unconverged_estimates: bool = False,
-        incumbent_rule: IncumbentRule | None = None,
+        level_test: LevelTest,
+        prob_bound: float,
+        risk_bound: float,
+        enforce_convergence: bool = False,
+        best_point_rule: SelectionRule | None = None,
+        test_point_rule: SelectionRule | None = None
     ):
-        super().__init__(model=model, incumbent_rule=incumbent_rule)
+        super().__init__(model=model, best_point_rule=best_point_rule)
         self.sampler = sampler
-        self.estimator_config = estimator_config
-        self.use_unconverged_estimates = use_unconverged_estimates
-
-        dtype = default_float()
-        self.risk_tolerance_model = tf.Variable(risk_tolerance_model, dtype=dtype)
-        self.risk_tolerance_error = tf.Variable(risk_tolerance_error, dtype=dtype)
+        self.level_test = level_test
+        self.prob_bound = tf.Variable(prob_bound, dtype=default_float())
+        self.risk_bound = tf.Variable(risk_bound, dtype=default_float())
+        self.enforce_convergence = tf.Variable(enforce_convergence)
+        self.test_point_rule = (
+                test_point_rule or InSampleProbabilityOfMinimum(num_points=5)
+        )
 
     def __call__(self, space: Box, dataset: TensorType) -> StoppingData:
         with Timer() as timer:
             # Determine whether the criterion has been satisfied
-            estimates, converged = self.evaluate(space=space, dataset=dataset)
-            risk = (
-                estimates
-                if self.use_unconverged_estimates
-                else tf.where(converged, estimates, float("inf"))
+            probs, converged = self.objective(space=space, dataset=dataset)
+            if self.enforce_convergence:
+                probs = tf.where(converged, probs, float("inf"))
+            passed = probs <= self.prob_bound
+            done = tf.reduce_any(passed)
+
+            # Choose a best point from the candidate set
+            candidate_data = (
+                Dataset(dataset.query_points[passed], dataset.observations[passed])
+                if done
+                else dataset
             )
-            mask = risk <= self.risk_tolerance_model
-            done = tf.reduce_any(mask)
-            if done:  # evaluate the incumbent rule on points that satisfy the criterion
-                incumbent = self.incumbent_rule(
-                    model=self.model,
-                    space=space,
-                    dataset=Dataset(dataset.query_points[mask], dataset.observations[mask]),
-                )
-                incumbent.index = tf.squeeze(tf.where(mask)[incumbent.index])
-            else:  # evaluate the incumbent rule on all points
-                incumbent = self.incumbent_rule(
-                    model=self.model, space=space, dataset=dataset
-                )
+            best_point = self.best_point_rule(
+                model=self.model,
+                space=space,
+                dataset=candidate_data,
+            )
+            if done:  # replace with global index
+                best_point.index = tf.squeeze(tf.where(passed)[best_point.index])
 
         return StoppingData(
             done=done,
-            value=tf.reduce_min(tf.where(tf.math.is_nan(risk), float("inf"), risk)),
-            incumbent=incumbent,
+            value=tf.reduce_min(tf.where(tf.math.is_nan(probs), float("inf"), probs)),
+            best_point=best_point,
             setup_time=timer.time,
         )
 
-    def evaluate(
+    def objective(
         self, space: Box, dataset: Dataset, prune: bool = True
     ) -> tuple[tf.Tensor, tf.Tensor]:
-        if prune:
-            test_mask = self.prune_test_points(points=dataset.query_points)
-            test_points = dataset.query_points[test_mask]
-        else:
-            test_points = dataset.query_points
+        # Decide which points to test
+        test_set = self.test_point_rule(self.model, space, dataset)
 
         # Samples indicators for whether test points fail to satisfy the regret bound
-        def _sampler(num_samples: TensorType) -> tf.Tensor:
+        def sampler(num_samples: TensorType) -> tf.Tensor:
             self.sampler.resample(space, num_samples)
-            failure_indicators = self.sampler(test_points)
-            return tf.transpose(tf.cast(failure_indicators, tf.float64))
+            return tf.transpose(self.sampler(test_set.point))  # num_points x num_samples
 
-        # Run the adaptive estimator
-        num_tests = int(tf.shape(test_points)[0])
-        moments, error_bounds = adaptive_empirical_bernstein_estimator(
-            sampler=_sampler,
-            sample_width=1.0,
-            threshold=self.risk_tolerance_model,
-            risk_tolerance=self.risk_tolerance_error / num_tests,
-            **asdict(self.estimator_config)
+        # Perform the level test
+        estimate, (lower, upper), _ = self.level_test(
+            sampler=sampler,
+            level=self.prob_bound,
+            risk=self.risk_bound / int(tf.shape(test_set.point)[0]),
+            axis=-1,
         )
-
-        estimates = moments.mean
-        converged = tf.abs(estimates - self.risk_tolerance_model) >= error_bounds
-
+        converged = (lower >= self.prob_bound) | (upper <= self.prob_bound)
         if prune:  # fill in values that were not computed
-            nan = tf.cast(float("nan"), estimates.dtype)
+            nan = tf.cast(float("nan"), estimate.dtype)
             size = tf.shape(dataset.query_points)[0]
-            estimates, converged = (
-                tf.squeeze(
-                    tf.tensor_scatter_nd_update(
-                        tf.fill((size, 1), default),
-                        tf.where(test_mask),
-                        tf.expand_dims(values, -1)
-                    ), axis=-1,
-                ) for values, default in ((estimates, nan), (converged, False))
+            estimate, converged = (
+                tf.tensor_scatter_nd_update(
+                    tf.fill((size, 1), default), test_set.index[..., None], values
+                ) for values, default in ((estimate, nan), (converged, False))
             )
 
-        return estimates, converged
-
-    def prune_test_points(self, points: TensorType) -> TensorType:
-        """
-        Uses an upper bound on the probability that `E = f(x) <= min f + epsilon`
-        to prune points incapable of satisfying the criterion `P(E) > 1 - delta`
-        """
-        # Evaluate joint posterior for `f(X)`
-        mean, covariance = self.model.predict_joint(points)
-        covariance = tf.squeeze(covariance, axis=0)
-        variances = tf.linalg.diag_part(covariance)
-        incumbent = tf.squeeze(tf.argmin(mean, axis=-2), -1)  # index of best point
-
-        # Compute means and variances for `f(x) - f(x*)`
-        d_means = tf.squeeze(mean - tf.gather(mean, incumbent, axis=-2), axis=-1)
-        d_variances = (
-                variances
-                + tf.gather(variances, incumbent, axis=-1)
-                - 2 * tf.gather(covariance, incumbent, axis=-1)
-        )
-        d_variances = tf.maximum(d_variances, 1e-12)  # clip for numerical stability
-
-        # Calculate complements of upper bounds `P[f(x) - f(x*) <= epsilon]`
-        complements = ndtr(tf.math.rsqrt(d_variances) * (d_means - self.regret_bound))
-        accept = tf.tensor_scatter_nd_update(  # ensure index point is accepted
-            tensor=tf.expand_dims(complements <= self.risk_tolerance_model, -1),
-            indices=[[incumbent]],
-            updates=[[True]],
-        )
-        return tf.squeeze(accept, axis=-1)
+        return tf.squeeze(estimate, axis=-1), tf.squeeze(converged, axis=-1)
 
     @property
     def regret_bound(self) -> tf.Variable:
@@ -241,9 +206,9 @@ class probabilistic_regret_bound(
 
 
 class RegretIndicatorSampler:
-    def __init__(
-        self, trajectory: MatheronTrajectory, regret_bound: float | TensorType
-    ):
+    """Class for simulating whether the regret incurred by a point exceeds a level."""
+
+    def __init__(self, trajectory: MatheronTrajectory, regret_bound: float):
         nan = float("nan")
         dtype = default_float()
         shape = tf.TensorShape(None)
@@ -255,7 +220,7 @@ class RegretIndicatorSampler:
 
     def __call__(self, x: TensorType) -> tf.Tensor:
         if not self.initialized:
-            raise RuntimeError
+            raise RuntimeError("Please use `resample` first to initialize.")
 
         samples = tf.squeeze(self.trajectory(x), -1)
         return tf.greater(samples, self.minima + self.regret_bound)
@@ -281,6 +246,7 @@ class RegretIndicatorSampler:
         custom_batches: Iterable[TensorType] | None = None,
         scipy_kwargs: dict | None = None,
     ) -> tuple[tf.Tensor, tf.Tensor]:
+        """Helper method for finding pathwise minimizers and minima."""
         if tf.rank(self.trajectory.batch_shape) != 1:
             raise NotImplementedError(
                 f"Expected rank-1 batch shape but {self.trajectory.batch_shape=}"
