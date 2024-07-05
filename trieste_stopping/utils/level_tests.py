@@ -25,20 +25,20 @@ def _get_default_risk_schedule(bound: float | tf.Tensor) -> PowerSchedule:
     return PowerSchedule(-1.1, initial_value=(0.1 / 1.1) * bound)
 
 
-class ConfidenceInterval(NamedTuple):
+class Interval(NamedTuple):
     lower: TensorType
     upper: TensorType
 
 
 class LevelTestResult(NamedTuple):
     estimate: TensorType
-    confidence_interval: ConfidenceInterval
+    interval: Interval
     sample_size: int
 
 
 class LevelTestConvergence(str, Enum):
     """Controls the estimator's stopping behavior when tests are run in parallel."""
-    ALL = "all"  # stop when all (confidence) intervals exclude the level
+    ALL = "all"  # stop when all intervals exclude the level
     ANY = "any"  # stop when any interval excludes the level
     # Stop when all intervals exclude the level OR...
     ANY_GE = "any_ge"  # any interval excludes the level from above
@@ -47,8 +47,8 @@ class LevelTestConvergence(str, Enum):
 
 class LevelTest:
     """
-    Performs a sequence of sample-based tests to determine whether a random variable's
-    expected value is above or below a level with high probability.
+    An algorithm that performs a sequence of sample-based tests to determine
+    if a random variable's expected value exceeds a level with high probability.
     """
     def __init__(
         self,
@@ -76,7 +76,7 @@ class LevelTest:
             )
 
         if size_schedule is None:
-            size_schedule = GeometricSchedule(1.5, initial_value=32)
+            size_schedule = GeometricSchedule(1.5, initial_value=16)
 
         self.size_limit = size_limit
         self.step_limit = _MAXINT if step_limit is None else step_limit
@@ -145,8 +145,8 @@ class LevelTest:
 
 class BernoulliLevelTest(LevelTest):
     """
-    Performs a sequence of statistical tests to determine whether the expected value
-    of a Bernoulli random variable is above or below a level with high probability.
+    An algorithm that performs a sequence of statistical tests to determine if the
+    expectation of a Bernoulli random variable exceeds a level with high probability.
     """
     def __call__(
         self,
@@ -179,11 +179,11 @@ class BernoulliLevelTest(LevelTest):
                 batch = sampler(batch_size)
                 size += batch_size
                 successes += tf.math.count_nonzero(batch, axis=axis, keepdims=True)
-            ci = self.get_interval(risk=risk, size=size, successes=successes)
-            should_stop = self.check_stopping(step, size, level, *ci, cutoff_time)
+            interval = self.get_interval(risk=risk, size=size, successes=successes)
+            should_stop = self.check_stopping(step, size, level, *interval, cutoff_time)
 
         estimate = tf.cast(successes, dtype) / tf.cast(size, dtype)
-        return LevelTestResult(estimate, confidence_interval=ci, sample_size=size)
+        return LevelTestResult(estimate, interval=interval, sample_size=size)
 
     @abstractmethod
     def get_interval(
@@ -191,10 +191,11 @@ class BernoulliLevelTest(LevelTest):
         risk: float | tf.Tensor,
         size: int | tf.Tensor,
         successes: int | tf.Tensor
-    ) -> ConfidenceInterval:
+    ) -> Interval:
         """
-        Constructs a `1 - risk` confidence interval based on the number of successes
-        `k` in `n` draws from a Binomial distribution.
+
+        Constructs a `1 - risk` confidence (or credible) interval based on the
+        number of successes `k` in `n` draws from a Bernoulli distribution.
 
         Args:
             risk: Upper bound on the probability that the interval does not contain
@@ -202,12 +203,12 @@ class BernoulliLevelTest(LevelTest):
             size: The number of samples drawn.
             successes: The number of successes observed.
 
-        Returns: A ConfidenceInterval.
+        Returns: An Interval.
         """
 
 
 class BayesianBernoulliLevelTest(BernoulliLevelTest):
-    """Bernoulli level test using a conjugate prior for the probability of success."""
+    """Bernoulli level test with equal-tailed, Bayesian credible intervals."""
     def __init__(
         self,
         size_schedule: Callable[[int], int] | None = None,
@@ -218,8 +219,8 @@ class BayesianBernoulliLevelTest(BernoulliLevelTest):
         convergence: LevelTestConvergence = LevelTestConvergence.ALL,
         prior: Beta | None = None,
     ):
-        if prior is None:
-            prior = Beta(tf.ones((), default_float()), tf.ones((), default_float()))
+        if prior is None:  # default to uniform prior
+            prior = Beta(tf.cast(1, default_float()), tf.cast(1, default_float()))
         elif not isinstance(prior, Beta):
             raise NotImplementedError
 
@@ -238,7 +239,7 @@ class BayesianBernoulliLevelTest(BernoulliLevelTest):
         risk: float | tf.Tensor,
         size: int | tf.Tensor,
         successes: int | tf.Tensor
-    ) -> ConfidenceInterval:
+    ) -> Interval:
         dtype = _get_dtype(risk)
         _0 = tf.zeros((), dtype=dtype)
         _1 = tf.ones((), dtype=dtype)
@@ -248,22 +249,23 @@ class BayesianBernoulliLevelTest(BernoulliLevelTest):
 
         k = tf.cast(successes, dtype)
         n = tf.cast(size, dtype)
-        p = Beta(a + k, n - k + b)  # posterior distribution of Binomial parameter
+        p = Beta(a + k, n - k + b)  # posterior distribution of success rate parameter
 
         lower = find_root_chandrupatla(lambda x: p.cdf(x) - c, _0, _1)[0]
         upper = find_root_chandrupatla(lambda x: p.survival_function(x) - c, _0, _1)[0]
-        return ConfidenceInterval(lower, upper)
+        return Interval(lower, upper)
 
 
 class ClopperPearsonLevelTest(BernoulliLevelTest):
-    """Bernoulli level test using two-sided Clopper-Pearson confidence intervals."""
+    """Bernoulli level test using Clopper-Pearson binomial proportion
+    confidence intervals."""
 
     def get_interval(
         self,
         risk: float | tf.Tensor,
         size: int | tf.Tensor,
         successes: int | tf.Tensor
-    ) -> ConfidenceInterval:
+    ) -> Interval:
         dtype = _get_dtype(risk)
         _0 = tf.zeros((), dtype=dtype)
         _1 = tf.ones((), dtype=dtype)
@@ -273,7 +275,7 @@ class ClopperPearsonLevelTest(BernoulliLevelTest):
         c = tf.cast(0.5 * risk, dtype)
         l = find_root_chandrupatla(lambda p: _1 - _bdtr(k - 1, n, p) - c, _0, _1)[0]
         u = find_root_chandrupatla(lambda p: _bdtr(k, n, p) - c, _0, _1,)[0]
-        return ConfidenceInterval(tf.where(k != 0, l, _0), tf.where(k != n, u, _1))
+        return Interval(tf.where(k != 0, l, _0), tf.where(k != n, u, _1))
 
 
 class EmpiricalBernsteinLevelTest(LevelTest):
@@ -330,10 +332,10 @@ class EmpiricalBernsteinLevelTest(LevelTest):
                 mean += tf.reduce_sum(diff, axis=axis, keepdims=True) / size
                 err2 += tf.reduce_sum(diff * (batch - mean), axis=axis, keepdims=True)
 
-            ci = self.get_interval(risk, size, mean, err2)
-            should_stop = self.check_stopping(step, size, level, *ci, cutoff_time)
+            interval = self.get_interval(risk, size, mean, err2)
+            should_stop = self.check_stopping(step, size, level, *interval, cutoff_time)
 
-        return LevelTestResult(mean, confidence_interval=ci, sample_size=size)
+        return LevelTestResult(mean, interval=interval, sample_size=size)
 
     def get_interval(
         self,
@@ -341,14 +343,14 @@ class EmpiricalBernsteinLevelTest(LevelTest):
         size: int | tf.Tensor,
         mean: float | tf.Tensor,
         err2: float | tf.Tensor,
-    ) -> ConfidenceInterval:
-        """Constructs an empirical Bernstein confidence interval."""
+    ) -> Interval:
+        """Constructs an empirical-Bernstein-based confidence interval."""
         dtype = _get_dtype(risk)
         isize = 1 / tf.cast(size, dtype)
         const = tf.math.log(3 / risk)
         width = self.sample_range[1] - self.sample_range[0]
         bound = isize * (tf.sqrt(2 / const * err2) + 3 * width * const)
-        return ConfidenceInterval(
+        return Interval(
             lower=tf.maximum(mean - bound, self.sample_range[0]),
             upper=tf.minimum(mean + bound, self.sample_range[1]),
         )
