@@ -87,11 +87,26 @@ def reduce_topk(
 
 
 def reduce_topk(inputs, k, axis=-1, smallest=False, callback=None):
+    """
+    Iterates over tensors and returns the top-k values.
+
+    Args:
+        inputs: An Iterable of tensors or iterables thereof.
+        k: The number of element to return for each iterated tensor.
+        axis: The axis along which to extract elements and define the top-k.
+        smallest: Flag for defining top-k as the least elements.
+        callback: An optional callback method.
+
+    Returns: The top-k elements from `inputs`. If inputs is an iterable of tensors, then
+        a tensor containing its top-k values along the specified axis will be returned.
+        If `inputs` is an iterable of iterables of tensors, then a tuple of tensors with
+        elements chosen according to the tensor in the first position will be returned.
+    """
+
     step: int | None = None
     rank: tf.Tensor | None = None
     swap: Callable[[TensorType], tf.Tensor] | None = None
     join: Callable[[TensorType, TensorType], tf.Tensor] | None = None
-
     tensor_mode: bool | None = None
     topk_values: TensorType | None = None
     topk_extras: list[TensorType, ...] | None = None
@@ -162,12 +177,12 @@ def reduce_topk(inputs, k, axis=-1, smallest=False, callback=None):
 def run_cmaes(
     func: Callable[[TensorType], TensorType],
     space: Box,
+    topk: int = 1,
     minimize: bool = False,
     initial_loc: TensorType | None = None,
     initial_scale: TensorType | None = None,
     population_size: int | None = None,
     seed: int | None = None,
-    topk: int = 1,
     tolx: float = 1e-12,
     tolfun: float = 1e-12,
     compile: bool = True,
@@ -176,6 +191,28 @@ def run_cmaes(
     batch_eval: bool = True,
     **kwargs: Any,
 ) -> tuple[tf.Tensor, tf.Tensor]:
+    """
+    Optimizes a function using CMA-ES and returns the top-k points.
+
+    Args:
+        func: The function to optimize.
+        space: A Box space on which to run the optimizer.
+        topk: The number of points to return.
+        minimize: A flag specifying that we should minimize rather than maximize.
+        initial_loc: An optional location parameter for the initial CMA-ES population.
+        initial_scale: An optional scale parameter for the initial CMA-ES population.
+        population_size: A optional size for CMA-ES population.
+        seed: An optimal pRNG seed.
+        tolx: A parameter for stopping when points are sufficiently close.
+        tolfun: A parameter for stopping when function values are sufficiently close.
+        compile: A flag specifying whether to compile the execution graph.
+        time_limit: An optional runtime limit.
+        step_limit: An optional limit for the number of CMA-ES populations.
+        batch_eval: A flag specifying whether `func` supports  parallel evaluations.
+        **kwargs: Additional arguments passed to the CMA instance.
+
+    Returns: The best found input-output pairs.
+    """
     start_time = monotonic()
     if initial_loc is None:
         initial_loc = 0.5 * (space.lower + space.upper)
@@ -219,7 +256,7 @@ def run_cmaes(
             yield Y, X
 
             # Check stopping conditions
-            if cma.should_stop() or monotonic() - start_time > time_limit:
+            if cma.should_stop() or monotonic() - start_time >= time_limit:
                 break
 
     # Run CMA-ES and accumulate best results
@@ -239,6 +276,10 @@ def find_start_points(
     num_cmaes_runs: int = 0,
     cmaes_kwargs: dict | None = None,
 ) -> tuple[tf.Tensor, tf.Tensor]:
+    """
+    A method for finding starting points from which to run multi-start gradient ascent.
+    """
+
     # Create a list of iterables for starting position candidates
     choices: list[Iterable[tuple[TensorType, TensorType]]] = []
     if num_cmaes_runs:
@@ -293,7 +334,6 @@ def run_multistart_gradient_ascent(
     cmaes_kwargs: dict | None = None,
     scipy_kwargs: dict | None = None,
 ) -> tuple[tf.Tensor, tf.Tensor]:
-
     # Find starting points
     start_points, _ = find_start_points(
         fun=fun,

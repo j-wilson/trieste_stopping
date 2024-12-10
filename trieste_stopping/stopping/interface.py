@@ -9,11 +9,8 @@ from trieste.data import Dataset
 from trieste.models.interfaces import ProbabilisticModelType
 from trieste.space import SearchSpace
 from trieste.types import TensorType
-from trieste_stopping.incumbent import (
-    IncumbentData,
-    IncumbentRule,
-    InSamplePosteriorMinimizer
-)
+from trieste_stopping.selection import InSamplePosteriorMinimizer, SelectionRule
+from trieste_stopping.utils import PointData
 
 StoppingCriterionType = TypeVar("StoppingCriterionType", bound="StoppingCriterion")
 
@@ -22,7 +19,7 @@ StoppingCriterionType = TypeVar("StoppingCriterionType", bound="StoppingCriterio
 class StoppingData:
     done: bool | int
     value: Number | TensorType
-    incumbent: IncumbentData
+    best_point: PointData
     setup_time: float
 
     def __post_init__(self):
@@ -33,28 +30,33 @@ class StoppingData:
 
 class StoppingCriterion(Generic[ProbabilisticModelType], ABC):
     """Interface for a generic stopping criterion."""
+
     def __init__(
         self,
         model: ProbabilisticModelType,
-        incumbent_rule: IncumbentRule | None = None,
+        best_point_rule: SelectionRule | None = None,
     ):
         self.model = model
-        self.incumbent_rule = incumbent_rule or InSamplePosteriorMinimizer()
+        self.best_point_rule = best_point_rule or InSamplePosteriorMinimizer()
 
     @abstractmethod
     def __call__(self, space: SearchSpace, dataset: Dataset) -> StoppingData:
-        pass
+        """
+        Main method for evaluating the stopping criterion.
 
-    @abstractmethod
-    def evaluate(self, space: SearchSpace, dataset: Dataset) -> Any:
-        pass
+        Args:
+            space: The set of points on which to assess the criterion.
+            dataset: The data to use when evaluating the criterion.
+
+        Returns: A StoppingData instance containing the result data.
+        """
 
 
 class StoppingRule(Generic[StoppingCriterionType]):
-    """Interface for a generic stopping rule."""
+    """Interface for a generic stopping rule, which manages a StoppingCriterion."""
 
-    def __init__(self, incumbent_rule: IncumbentRule | None = None):
-        self.incumbent_rule = incumbent_rule or InSamplePosteriorMinimizer()
+    def __init__(self, best_point_rule: SelectionRule | None = None):
+        self._best_point_rule = best_point_rule or InSamplePosteriorMinimizer()
         self._criterion = None
 
     def __call__(

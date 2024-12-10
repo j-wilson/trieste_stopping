@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-from math import log, pi
-from typing import Callable
-
 import tensorflow as tf
 from gpflow.config import default_float
 from trieste.data import Dataset
 from trieste.models.gpflow import GaussianProcessRegression
-from trieste.space import Box
+from trieste.space import Box, SearchSpace
 from trieste.types import TensorType
 from trieste.utils import Timer
-from trieste_stopping.incumbent import IncumbentRule
+from trieste_stopping.selection import SelectionRule
+from trieste_stopping.models.models import GeneralizedGaussianProcessRegression
 from trieste_stopping.utils import run_multistart_gradient_ascent
+from trieste_stopping.utils.schedules import BetaParameterSchedule, Schedule
 from trieste_stopping.stopping.interface import (
     StoppingCriterion,
     StoppingData,
@@ -20,25 +19,53 @@ from trieste_stopping.stopping.interface import (
 
 
 class ConfidenceBound(StoppingRule["confidence_bound"]):
+    """
+    Stopping rule from Makarova et al., 2022. "Automatic Termination for Hyperparameter
+    Optimization".
+
+    Stops when the difference between upper and lower confidence bounds is less-equal to
+    a threshold. For appropriate chosen schedules of `beta`, this correspond to a
+    high-probabililty upper bound on the simple regret.
+    """
+
     def __init__(
         self,
-        regret_bound: float,
-        beta_schedule: Callable[[int], float],
-        incumbent_rule: IncumbentRule | None = None,
-):
-        super().__init__(incumbent_rule=incumbent_rule)
-        self.regret_bound = regret_bound
-        self.beta_schedule = beta_schedule
+        threshold: float,
+        risk_bound: float | None = None,
+        beta_schedule: Schedule[float] | None = None,
+        best_point_rule: SelectionRule| None = None,
+    ):
+        """
+        Args:
+            threshold: A scalar used to decide when to stop.
+            risk_bound: Upper bound on probability used to define confidence bounds.
+            beta_schedule: A schedule for the beta parameter.
+            best_point_rule: A rule for choosing a most-preferred point.
+        """
+        if not (risk_bound is None) ^ (beta_schedule is None):
+            raise ValueError(
+                "One and only one of `risk_bound` or `beta_schedule` must be passed."
+            )
+
+        super().__init__(best_point_rule=best_point_rule)
+        self._threshold = threshold
+        self._risk_bound = risk_bound
+        self._beta_schedule = beta_schedule
 
     def prepare_stopping_criterion(
         self, model: GaussianProcessRegression, dataset: Dataset,
     ) -> confidence_bound:
+        if self._beta_schedule is None:
+            self._beta_schedule = self._get_default_beta_schedule(
+                dataset.query_points.shape[-1]
+            )
+
         step = int(tf.shape(dataset.observations)[0])
         return confidence_bound(
             model=model,
-            incumbent_rule=self.incumbent_rule,
-            regret_bound=self.regret_bound,
-            beta=self.beta_schedule(step),
+            best_point_rule=self._best_point_rule,
+            threshold=self._threshold,
+            beta=self._beta_schedule(step),
         )
 
     def update_stopping_criterion(
@@ -53,80 +80,94 @@ class ConfidenceBound(StoppingRule["confidence_bound"]):
         if model is not criterion.model:
             raise NotImplementedError
 
-        if self.incumbent_rule not in (None, criterion.incumbent_rule):
+        if self._best_point_rule not in (None, criterion.best_point_rule):
             raise NotImplementedError
 
+        if self._beta_schedule is None:
+            self._beta_schedule = self._get_default_beta_schedule(
+                dataset.query_points.shape[-1]
+            )
+
         step = int(tf.shape(dataset.observations)[0])
-        criterion.regret_bound.assign(self.regret_bound)
-        criterion.beta.assign(self.beta_schedule(step))
+        criterion.threshold.assign(self._threshold)
+        criterion.beta.assign(self._beta_schedule(step))
         return criterion
+
+    def _get_default_beta_schedule(self, dim: int, scale: float = 2/5
+    ) -> BetaParameterSchedule:
+        """Returns the schedule for the beta parameter from Makarova et al., 2022."""
+        return BetaParameterSchedule(dim, risk_bound=self._risk_bound, scale=2 / 5)
 
 
 class confidence_bound(StoppingCriterion[GaussianProcessRegression]):
     def __init__(
         self,
         model: GaussianProcessRegression,
-        regret_bound: float,
+        threshold: float,
         beta: float,
-        incumbent_rule: IncumbentRule | None = None,
+        best_point_rule: SelectionRule | None = None,
     ):
-        super().__init__(model=model, incumbent_rule=incumbent_rule)
+        super().__init__(model=model, best_point_rule=best_point_rule)
         self.beta = tf.Variable(beta, dtype=default_float())
-        self.regret_bound = tf.Variable(regret_bound, dtype=default_float())
+        self.threshold = tf.Variable(threshold, dtype=default_float())
 
-    def __call__(self, space: Box, dataset: TensorType) -> StoppingData:
+    def __call__(self, space: SearchSpace, dataset: Dataset) -> StoppingData:
         with Timer() as timer:
-            bounds = self.evaluate(space=space, dataset=dataset)
-            mask = bounds <= self.regret_bound
-            done = tf.reduce_any(mask)
-            if done:  # evaluate the incumbent rule on points that satisfy the criterion
-                incumbent = self.incumbent_rule(
-                    model=self.model,
-                    space=space,
-                    dataset=Dataset(dataset.query_points[mask], dataset.observations[mask]),
-                )
-                incumbent.index = tf.squeeze(tf.where(mask)[incumbent.index])
-            else:  # evaluate the incumbent rule on all points
-                incumbent = self.incumbent_rule(
-                    model=self.model, space=space, dataset=dataset
-                )
+            bounds = self.objective(space=space, dataset=dataset)
+            passed = bounds <= self.threshold
+            done = tf.reduce_any(passed)
+
+            # Choose a best point from the candidate set
+            candidate_data = (
+                Dataset(dataset.query_points[passed], dataset.observations[passed])
+                if done
+                else dataset
+            )
+            best_point = self.best_point_rule(
+                model=self.model,
+                space=space,
+                dataset=candidate_data,
+            )
+            if done:  # replace with global index
+                best_point.index = tf.squeeze(tf.where(passed)[best_point.index])
 
         return StoppingData(
             done=done,
             value=tf.reduce_min(bounds),
-            incumbent=incumbent,
+            best_point=best_point,
             setup_time=timer.time,
         )
 
-    def evaluate(self, space: Box, dataset: Dataset) -> tf.Tensor:
+    def objective(self, space: Box, dataset: Dataset) -> tf.Tensor:
         """
-        Tests whether `min UCB(query_points) - min LCB(space) <= regret_bound`.
-        """
-        with Timer() as timer:
-            ucb_values = self._upper_confidence_bound(dataset.query_points)
-            threshold = self.regret_bound - tf.reduce_min(ucb_values)
-            nlcb_point, nlcb_value = run_multistart_gradient_ascent(
-                fun=self._neg_lower_confidence_bound,
-                space=space,
-                num_cmaes_runs=1 if space.dimension > 1 else 0,
-                scipy_kwargs={"stop_callback": lambda res: res.fun >= threshold},
-            )
-            bounds = ucb_values + nlcb_value
+        Evaluates `UCB(query_points) - min_{x \in space} LCB(x)`.
 
-        return bounds
+        Args:
+            space: The space over which to compute the bound.
+            dataset: A dataset consting of labelled pairs.
+
+        Returns: A vector of bounds.
+        """
+        ucb_values = self._upper_confidence_bound(dataset.query_points)
+        nlcb_point, nlcb_value = run_multistart_gradient_ascent(
+            fun=self._neg_lower_confidence_bound,
+            space=space,
+            num_cmaes_runs=1 if space.dimension > 1 else 0,
+        )
+        return ucb_values + nlcb_value
 
     @tf.function
     def _neg_lower_confidence_bound(self, x: TensorType) -> TensorType:
         mean, variance = self.model.predict(x)
-        return tf.squeeze(tf.sqrt(variance * self.beta) - mean, -1)
+        bound = mean - tf.sqrt(variance * self.beta)
+        if isinstance(self.model, GeneralizedGaussianProcessRegression):
+            bound = self.model.link_function.inverse(bound)  # assumed increasing
+        return -tf.squeeze(bound, axis=-1)
 
+    @tf.function
     def _upper_confidence_bound(self, x: TensorType) -> TensorType:
         mean, variance = self.model.predict(x)
-        return tf.squeeze(mean + tf.sqrt(variance * self.beta), -1)
-
-
-def build_default_beta_schedule(risk_tolerance: float, dim: int):
-    """Helper method for the beta schedule recommended by Makarova et. al, 2022."""
-    def schedule_func(step: int) -> float:
-        return (2 / 5) * log((step * pi) ** 2 * dim / (6 * risk_tolerance))
-    return schedule_func
+        bound = mean + tf.sqrt(variance * self.beta)
+        if isinstance(self.model, GeneralizedGaussianProcessRegression):
+            bound = self.model.link_function.inverse(bound)  # assumed increasing
+        return tf.squeeze(bound, axis=-1)

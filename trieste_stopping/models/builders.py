@@ -6,48 +6,74 @@ import tensorflow as tf
 import tensorflow_probability as tfp
 from gpflow.base import Parameter, PriorOn
 from gpflow.config import default_float
-from gpflow.models import GPR
 from gpflow.kernels import Matern52
 from gpflow.likelihoods import Gaussian
 from gpflow.mean_functions import Constant
+from gpflow.models import GPR
 from trieste.data import Dataset
 from trieste.models.gpflow import GaussianProcessRegression
 from trieste.models.optimizer import Optimizer
+from trieste.objectives import ObjectiveTestProblem
 from trieste.space import Box
+from trieste_stopping.models.models import GeneralizedGaussianProcessRegression
 from trieste_stopping.models.optimizers import (
+    CMAOptimizer,
     EmpiricalBayesOptimizer,
     OptimizerPipeline,
     ScipyOptimizer,
 )
 from trieste_stopping.models.parameters import UniformEmpiricalBayesParameter
-from trieste_stopping.settings import (
-    empirical_variance_floor,
-    kernel_lengthscale_median,
-    kernel_variance_init,
-    kernel_variance_range,
-    mean_percentile_range,
-    likelihood_variance_init,
-    likelihood_variance_range,
-)
+from trieste_stopping.utils import Setting
+
+# Default settings for (empirical Bayes) hyperpriors
+empirical_variance_floor: Setting[float] = Setting(1e-6)
+
+mean_percentile_range: Setting[tuple[float, float]] = Setting((5.0, 95.0))
+
+kernel_variance_init: Setting[float] = Setting(1.0)
+kernel_variance_range: Setting[tuple[float, float]] = Setting((0.1, 10.0))
+kernel_lengthscale_median: Setting[float] = Setting(0.5)
+
+likelihood_variance_init: Setting[float] = Setting(0.1)
+likelihood_variance_range: Setting[tuple[float, float]] = Setting((1e-9, 10.0))
 
 
 def build_model(
-    space: Box,
+    space: ObjectiveTestProblem,
     dataset: Dataset,
+    link_function: tfp.bijectors.Bijector | None = None,
     optimizer: Optimizer | None = None,
     **kwargs: Any,
 ) -> GaussianProcessRegression:
-    """Builds a GaussianProcessRegression model bridge."""
+    """
+    Builds a GaussianProcessRegression model bridge.
+    """
     if optimizer is None:
-        optimizer = OptimizerPipeline([EmpiricalBayesOptimizer(), ScipyOptimizer()])
+        # Update hyperpriors, initialize with CMA-ES, then fine-tune with L-BFGS-B
+        optimizer = OptimizerPipeline(
+            optimizers=[
+                EmpiricalBayesOptimizer(),
+                CMAOptimizer(minimize_args={"tolfun": 1.0}),
+                ScipyOptimizer()
+            ]
+        )
 
-    model = GPR(
-        data=dataset.astuple(),
-        mean_function=build_mean_function(space, dataset),
-        kernel=build_covariance_function(space, dataset),
-        likelihood=build_likelihood_function(space, dataset)
+    internal_dataset = (
+        dataset
+        if link_function is None
+        else Dataset(dataset.query_points, link_function(dataset.observations))
     )
-    return GaussianProcessRegression(model, optimizer=optimizer, **kwargs)
+
+    model = GPR(  # same as GPR but transforms y-values w/a link function `g`
+        data=internal_dataset.astuple(),
+        kernel=build_covariance_function(space, internal_dataset),
+        likelihood=build_likelihood_function(space, internal_dataset),
+        mean_function=build_mean_function(space, internal_dataset),
+    )
+    model_bridge = GeneralizedGaussianProcessRegression(
+        model=model, optimizer=optimizer, link_function=link_function, **kwargs
+    )
+    return model_bridge
 
 
 def build_mean_function(space: Box, dataset: Dataset) -> Constant:
@@ -60,6 +86,9 @@ def build_mean_function(space: Box, dataset: Dataset) -> Constant:
     # Build mean parameter
     value = tfp.stats.percentile(dataset.observations, 50)
     low, high = get_range(dataset)
+    if value == low or value == high:
+        value = 0.5 * (low + high)  # edge case
+
     mean_function.c = UniformEmpiricalBayesParameter(
         value=value,
         prior=tfp.distributions.Uniform(

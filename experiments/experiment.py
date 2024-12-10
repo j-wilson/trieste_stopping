@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from unittest.mock import patch
 
 import tensorflow as tf
-from gpflow.base import Parameter
 from trieste_stopping.models import build_model, get_parameters, set_parameters
 from trieste_stopping.stopping.interface import StoppingData, StoppingRule
 from trieste.acquisition.interface import AcquisitionFunction
@@ -15,20 +14,13 @@ from trieste.models.gpflow import GaussianProcessRegression
 from trieste.objectives import SingleObjectiveTestProblem
 from trieste.types import TensorType
 from trieste.utils import Timer
+from trieste_stopping.utils import PointData
 
 
 @dataclass
 class ModelData:
-    parameters: dict[str, Parameter]
+    parameters: dict[str, TensorType]
     setup_time: float | None = None
-
-
-@dataclass
-class PointData:
-    point: TensorType
-    index: int | None
-    mean: TensorType | None
-    variance: TensorType | None
 
 
 @dataclass
@@ -37,8 +29,8 @@ class QueryData(PointData):
     index: int | None
     mean: TensorType | None
     variance: TensorType | None
-    acquisition: TensorType | None
     observation: TensorType | None = None
+    acquisition: TensorType | None =  None
     setup_time: float | None = None
     observation_time: float | None = None
 
@@ -54,20 +46,20 @@ class StepData:
 class Experiment:
     def __init__(
         self,
-        problem: SingleObjectiveTestProblem,
+        objective: SingleObjectiveTestProblem,
         dataset: Dataset,
         acquisition_rule: AcquisitionRule,
         stopping_rule: StoppingRule,
         model: GaussianProcessRegression | None = None,
     ):
         if model is None:
-            model = build_model(problem.search_space, dataset)
+            model = build_model(objective.search_space, dataset)
 
-        self.problem = problem
+        self.objective = objective
         self.optimizer = AskTellOptimizer(
             models=model,
             datasets=dataset,
-            search_space=problem.search_space,
+            search_space=objective.search_space,
             acquisition_rule=acquisition_rule,
             fit_model=False,
         )
@@ -85,7 +77,7 @@ class Experiment:
 
         # Evaluate the stopping rule
         stopping_data = self.stopping_rule(
-            model=self.model, space=self.problem.search_space, dataset=self.dataset,
+            model=self.model, space=self.objective.search_space, dataset=self.dataset,
         )
 
         # Maybe ask-tell another query
@@ -94,7 +86,7 @@ class Experiment:
         else:
             query_data = self.ask(step)
             with Timer() as timer:
-                query_data.observation = self.problem.objective(query_data.point)
+                query_data.observation = self.objective.objective(query_data.point)
             query_data.observation_time = timer.time
             self.tell(new_data=Dataset(query_data.point, query_data.observation))
 

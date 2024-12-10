@@ -11,7 +11,7 @@ from typing import Any, Callable, Generic, Iterator, overload, Sequence, TypeVar
 from typing_extensions import Self
 
 from multipledispatch import Dispatcher
-from trieste_stopping.settings import Setting
+from trieste_stopping.utils import Setting
 
 T = TypeVar("T", bound=object)
 Build = Dispatcher("build")
