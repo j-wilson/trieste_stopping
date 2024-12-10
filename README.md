@@ -21,35 +21,31 @@ pip install ".[experiments,tutorials]"
 Tutorials for parts of this package are included in the `tutorials` directory. These notebooks explain various methods ad APIs:
 
 
-| Notebook           | Content                                                      |
-|--------------------|--------------------------------------------------------------|
-| [adaptive_estimator](https://github.com/j-wilson/trieste_stopping/blob/main/tutorials/adaptive_estimator.ipynb) | Review of adaptive empirical Bernstein estimator algorithm |
-| [factories](https://github.com/j-wilson/trieste_stopping/blob/main/tutorials/factories.ipynb)          | Demo of helper methods used for experiment book keeping    |
-| [knowledge_gradient](https://github.com/j-wilson/trieste_stopping/blob/main/tutorials/knowledge_gradient.ipynb) | Comparison of EI and (in-sample) KG acquisition functions  | 
-| [stopping_rules](https://github.com/j-wilson/trieste_stopping/blob/main/tutorials/stopping_rules.ipynb)     | Overview of stopping rules                                 |
+| Notebook                                                                                                        | Content                                                   |
+|-----------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------|
+| [level_tests](https://github.com/j-wilson/trieste_stopping/blob/main/tutorials/level_tests.ipynb)               | Review of statistical tests                               |
+| [factories](https://github.com/j-wilson/trieste_stopping/blob/main/tutorials/factories.ipynb)                   | Demo of helper methods used for experiment book keeping   |
+| [knowledge_gradient](https://github.com/j-wilson/trieste_stopping/blob/main/tutorials/knowledge_gradient.ipynb) | Comparison of EI and (in-sample) KG acquisition functions | 
+| [stopping_rules](https://github.com/j-wilson/trieste_stopping/blob/main/tutorials/stopping_rules.ipynb)         | Overview of stopping rules                                |
 
 
 # Experiments
-Experiments from the companion paper can be run using the `experiments/run_experiments.py` script. 
-
-For example, you can run BO on Branin with the  `ProbabilisticRegretBound` stopping rule by calling
+Experiments from the companion paper can be run using the `experiments/run_local_experiments.py` and `experiments/run_wandb_experiments.py` scripts. For example, you can run BO on Branin with the `ProbabilisticRegretBound` stopping rule by calling
 ```commandline
-python -m experiments.run_experiment --problem Branin --step_limit 64 --seed 0
+python -m experiments.run_local_experiment --objective Branin --step_limit 64 --seed 0
 ```
 - Stopping rules can be chosen using the `--stopping_rule` argument and may be configured by passing a string-encoded dictionary via the `--stopping_kwargs` flag. 
 
-- Problems can be selected via the `--problem` flag. If you wish to minimize a draw from a GP prior, you should pass `--problem Matern52Objective` along with a dictionary of string-encoded arguments for `--problem_kwargs` (see below).
+- Objectives can be configured via the `--objective` and `--objective_kwargs` flags. 
 
-- We recommend enabling [wandb](https://wandb.ai) for better quality of life. Assuming W&B is already setup on your machine, this functionality can be enabled by passing a project name via the `--wandb` flag. Some runs have been uploaded [here](https://wandb.ai/jtwilson/trieste_stopping/workspace?workspace=user-jtwilson) for demonstration purposes.
-
- - A worked example is given below:
+- We recommend enabling [wandb](https://wandb.ai) to help track experiments. Some runs have been uploaded [here](https://wandb.ai/jtwilson/trieste_stopping/workspace?workspace=user-jtwilson) for demonstration purposes and a worked example is given below:
 ```commandline
-python -m experiments.run_experiment \
+python -m experiments.run_wandb_experiment \
 --seed 0 \
---wandb trieste_stopping \
+--project trieste_stopping \
 --step_limit 64 \
---problem Matern52Objective \
---problem_kwargs '{"dim": 2, "lengthscales": 0.33, "noise_variance": 1e-6}' \
+--objective Matern52Trajectory \
+--objective_kwargs '{"dim": 2, "lengthscales": 0.33, "noise_variance": 1e-6}' \
 --stopping_rule AcquisitionThreshold \
 --stopping_kwargs '{"threshold": 1e-5}' 
 ```

@@ -43,6 +43,7 @@ class ProbabilisticRegretBound(StoppingRule["probabilistic_regret_bound"]):
         level_test: LevelTest | None = None,
         enforce_convergence: bool = True,
         best_point_rule: SelectionRule | None = None,
+        test_point_rule: SelectionRule | None = None,
     ):
         """
         Args:
@@ -55,6 +56,7 @@ class ProbabilisticRegretBound(StoppingRule["probabilistic_regret_bound"]):
             enforce_convergence: Flag controlling whether estimates produced by level
                 tests that did not converge (due to resource constraints) can be used.
             best_point_rule: A rule for choosing a most-preferred point.
+            test_point_rule: A rule for choosing where to evaluate stopping.
         """
         if risk_bound is not None:  # schedule risk bounds for each sequence of tests
             if risk_schedule is not None:
@@ -70,6 +72,9 @@ class ProbabilisticRegretBound(StoppingRule["probabilistic_regret_bound"]):
         self._regret_bound = regret_bound
         self._risk_schedule = risk_schedule
         self._enforce_convergence = enforce_convergence
+        self._test_point_rule = (
+            test_point_rule or InSampleProbabilityOfMinimum(num_points=5)
+        )
 
     def prepare_stopping_criterion(
         self, model: GaussianProcessRegression, dataset: Dataset,
@@ -83,11 +88,12 @@ class ProbabilisticRegretBound(StoppingRule["probabilistic_regret_bound"]):
         step = float(tf.shape(dataset.observations)[0])
         return probabilistic_regret_bound(
             model=model,
-            best_point_rule=self._best_point_rule,
             sampler=sampler,
             level_test=self._level_test,
             prob_bound=self._prob_bound,
             risk_bound=self._risk_schedule(step),
+            best_point_rule=self._best_point_rule,
+            test_point_rule=self._test_point_rule,
             enforce_convergence=self._enforce_convergence,
         )
 
@@ -104,6 +110,9 @@ class ProbabilisticRegretBound(StoppingRule["probabilistic_regret_bound"]):
             raise NotImplementedError
 
         if self._best_point_rule not in (None, criterion.best_point_rule):
+            raise NotImplementedError
+
+        if self._test_point_rule not in (None, criterion.test_point_rule):
             raise NotImplementedError
 
         # Configure the criterion
@@ -137,7 +146,7 @@ class probabilistic_regret_bound(StoppingCriterion[GaussianProcessRegression]):
         self.risk_bound = tf.Variable(risk_bound, dtype=default_float())
         self.enforce_convergence = tf.Variable(enforce_convergence)
         self.test_point_rule = (
-                test_point_rule or InSampleProbabilityOfMinimum(num_points=5)
+            test_point_rule or InSampleProbabilityOfMinimum(num_points=5)
         )
 
     def __call__(self, space: Box, dataset: TensorType) -> StoppingData:
@@ -170,9 +179,7 @@ class probabilistic_regret_bound(StoppingCriterion[GaussianProcessRegression]):
             setup_time=timer.time,
         )
 
-    def objective(
-        self, space: Box, dataset: Dataset, prune: bool = True
-    ) -> tuple[tf.Tensor, tf.Tensor]:
+    def objective(self, space: Box, dataset: Dataset) -> tuple[tf.Tensor, tf.Tensor]:
         # Decide which points to test
         test_set = self.test_point_rule(self.model, space, dataset)
 
@@ -189,15 +196,6 @@ class probabilistic_regret_bound(StoppingCriterion[GaussianProcessRegression]):
             axis=-1,
         )
         converged = (lower >= self.prob_bound) | (upper <= self.prob_bound)
-        if prune:  # fill in values that were not computed
-            nan = tf.cast(float("nan"), estimate.dtype)
-            size = tf.shape(dataset.query_points)[0]
-            estimate, converged = (
-                tf.tensor_scatter_nd_update(
-                    tf.fill((size, 1), default), test_set.index[..., None], values
-                ) for values, default in ((estimate, nan), (converged, False))
-            )
-
         return tf.squeeze(estimate, axis=-1), tf.squeeze(converged, axis=-1)
 
     @property

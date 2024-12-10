@@ -63,8 +63,8 @@ class AcquisitionThreshold(StoppingRule["acquisition_threshold"]):
         if self._best_point_rule not in (None, criterion.best_point_rule):
             raise NotImplementedError
 
-        criterion._acquisition_rule = self._acquistion_rule
-        criterion._threshold.assign(self._threshold)
+        criterion.acquisition_rule = self._acquistion_rule
+        criterion.threshold.assign(self._threshold)
         return criterion
 
 
@@ -91,7 +91,6 @@ class acquisition_threshold(StoppingCriterion):
                 search_space=space,
             )
             acq_value = tf.squeeze(self.acquisition_function(maximizer[:, None, :]))
-
             best_point = self.best_point_rule(
                 model=self.model, space=space, dataset=dataset
             )

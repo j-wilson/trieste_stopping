@@ -28,6 +28,25 @@ class SelectionRule(ABC):
         pass
 
 
+class SelectAll(SelectionRule):
+    """A selection rule which selects all points."""
+    def __call__(
+        self,
+        model: GaussianProcessRegression,
+        space: SearchSpace,
+        dataset: Dataset,
+        **kwargs: Any,
+    ) -> PointData:
+        means, variances = model.predict(dataset.query_points)
+        return PointData(
+            point=dataset.query_points,
+            mean=means,
+            index=tuple(range(len(dataset.query_points))),
+            variance=variances,
+            observation=dataset.observations,
+        )
+
+
 class InSamplePosteriorMinimizer(SelectionRule):
     """Returns a point whose expected value under the posterior is the smallest."""
     def __call__(

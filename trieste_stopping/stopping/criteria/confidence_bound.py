@@ -30,7 +30,7 @@ class ConfidenceBound(StoppingRule["confidence_bound"]):
 
     def __init__(
         self,
-        threshold: float = 0.1,
+        threshold: float,
         risk_bound: float | None = None,
         beta_schedule: Schedule[float] | None = None,
         best_point_rule: SelectionRule| None = None,
