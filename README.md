@@ -23,10 +23,10 @@ Tutorials for parts of this package are included in the `tutorials` directory. T
 
 | Notebook           | Content                                                      |
 |--------------------|--------------------------------------------------------------|
-| [adaptive_estimator](https://github.com/j-wilson/trieste_stopping/blob/icml2024/tutorials/adaptive_estimator.ipynb) | Review of adaptive empirical Bernstein estimator algorithm |
-| [factories](https://github.com/j-wilson/trieste_stopping/blob/icml2024/tutorials/factories.ipynb)          | Demo of helper methods used for experiment book keeping    |
-| [knowledge_gradient](https://github.com/j-wilson/trieste_stopping/blob/icml2024/tutorials/knowledge_gradient.ipynb) | Comparison of EI and (in-sample) KG acquisition functions  | 
-| [stopping_rules](https://github.com/j-wilson/trieste_stopping/blob/icml2024/tutorials/stopping_rules.ipynb)     | Overview of stopping rules                                 |
+| [adaptive_estimator](https://github.com/j-wilson/trieste_stopping/blob/main/tutorials/adaptive_estimator.ipynb) | Review of adaptive empirical Bernstein estimator algorithm |
+| [factories](https://github.com/j-wilson/trieste_stopping/blob/main/tutorials/factories.ipynb)          | Demo of helper methods used for experiment book keeping    |
+| [knowledge_gradient](https://github.com/j-wilson/trieste_stopping/blob/main/tutorials/knowledge_gradient.ipynb) | Comparison of EI and (in-sample) KG acquisition functions  | 
+| [stopping_rules](https://github.com/j-wilson/trieste_stopping/blob/main/tutorials/stopping_rules.ipynb)     | Overview of stopping rules                                 |
 
 
 # Experiments
@@ -57,13 +57,12 @@ python -m experiments.run_experiment \
 
 # Citing Us
 ```
-@misc{wilson2024stopping,
+@article{wilson2024stopping,
     title={{Stopping Bayesian Optimization with Probabilistic Regret Bounds}}, 
     author={James T. Wilson},
+    journal={Advances in Neural Information Processing Systems},
     year={2024},
-    eprint={2402.16811},
-    archivePrefix={arXiv},
-    primaryClass={stat.ML}
+    url={https://arxiv.org/abs/2402.16811},
 }
 ```
 
