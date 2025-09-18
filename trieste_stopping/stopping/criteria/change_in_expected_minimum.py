@@ -3,7 +3,7 @@ from __future__ import annotations
 from math import pi
 
 import tensorflow as tf
-from tensorflow.python.ops.numpy_ops import allclose, diff
+from tensorflow.python.ops.numpy_ops.np_math_ops import allclose, diff
 from tensorflow_probability.python.internal.special_math import ndtr
 from trieste.data import Dataset
 from trieste.models.gpflow import GaussianProcessRegression
